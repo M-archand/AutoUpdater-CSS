@@ -37,7 +37,25 @@ jobs:
       - name: Restore and Publish
         run: |
           dotnet restore AutoUpdater.csproj
-          dotnet publish AutoUpdater.csproj -c Release
+          dotnet publish AutoUpdater.csproj -c Release -o publish
+
+      - name: Create zip artifact
+        run: |
+          if [ ! -f publish/AutoUpdater.dll ]; then
+            echo "::error::publish/AutoUpdater.dll not found after publish"
+            exit 1
+          fi
+
+          # CSS install layout: archive root contains AutoUpdater/ to be
+          # extracted into counterstrikesharp/plugins
+          rm -rf package
+          mkdir -p package/AutoUpdater
+          cp -r publish/. package/AutoUpdater/
+
+          cd package
+          zip -r ../AutoUpdater.zip AutoUpdater
+          cd ..
+          echo "Created AutoUpdater.zip"
 
       - name: Prepare release artifact
         id: zip
