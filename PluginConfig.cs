@@ -1,26 +1,26 @@
-namespace AutoUpdater
+using System.Text.Json.Serialization;
+using CounterStrikeSharp.API.Core;
+
+namespace AutoUpdater;
+
+
+public sealed class PluginConfig : BasePluginConfig
 {
-    using System.Text.Json.Serialization;
-    using CounterStrikeSharp.API.Core;
+    [JsonPropertyName("ConfigVersion")] 
+    public override int Version { get; set; } = 3;
 
-    public sealed class PluginConfig : BasePluginConfig
-    {
-        [JsonPropertyName("ConfigVersion")] 
-        public override int Version { get; set; } = 2;
+    [JsonPropertyName("UpdateCheckInterval")]
+    public int UpdateCheckInterval { get; set; } = 180;
 
-        [JsonPropertyName("UpdateCheckInterval")]
-        public int UpdateCheckInterval { get; set; } = 180;
+    [JsonPropertyName("ShutdownDelay")]
+    public int ShutdownDelay { get; set; } = 120;
 
-        [JsonPropertyName("ShutdownDelay")] 
-        public int ShutdownDelay { get; set; } = 120;
+    [JsonPropertyName("ShutdownMessageInterval")]
+    public int ShutdownMessageInterval { get; set; } = 30;
 
-        [JsonPropertyName("MinPlayersInstantShutdown")]
-        public int MinPlayersInstantShutdown { get; set; } = 1;
+    [JsonPropertyName("MinPlayersInstantShutdown")]
+    public int MinPlayersInstantShutdown { get; set; } = 0;
 
-        [JsonPropertyName("MinPlayerPercentageShutdownAllowed")]
-        public float MinPlayerPercentageShutdownAllowed { get; set; } = 0.6f;
-
-        [JsonPropertyName("ShutdownOnMapChangeIfPendingUpdate")]
-        public bool ShutdownOnMapChangeIfPendingUpdate { get; set; } = true;
-    }
+    [JsonPropertyName("ShutdownOnMapChangeIfPendingUpdate")]
+    public bool ShutdownOnMapChangeIfPendingUpdate { get; set; } = true;
 }

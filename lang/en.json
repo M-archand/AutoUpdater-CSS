@@ -1,6 +1,7 @@
 {
-  "AutoUpdater.Chat.Prefix": "[{green}AutoUpdater{default}]",
-  "AutoUpdater.Chat.NewUpdateReleased": "New Counter-Strike 2 update released (Version: {0}) the server will restart in {1}",
+  "AutoUpdater.Chat.Prefix": "{lime}[SERVER]{default}",
+  "AutoUpdater.Chat.NewUpdateReleased": "{lightred}CS2 UPDATE DETECTED. Server will restart in {lime}{1}",
+  "AutoUpdater.Chat.InstantRestart": "CS2 UPDATE DETECTED. Server is now restarting...",
   "AutoUpdater.Chat.PluralSuffix": "s",
   "AutoUpdater.Chat.MinuteLabel": "minute",
   "AutoUpdater.Chat.SecondLabel": "second",
@@ -11,6 +12,8 @@
   "AutoUpdater.Console.ErrorUpdateCheck": "An error occurred checking the server for updates: {0}",
   "AutoUpdater.Console.ErrorPatchVersionNull": "The current patch version of Counter-Strike 2 could not be retrieved. This server will not be checked for updates.",
   "AutoUpdater.Console.WarningSteamRequestFailed": "Steam HTTP request failed with status code: {0}",
+  "AutoUpdater.Console.ErrorSteamRequestException": "The Steam update check request failed: {0}. Retrying at the next interval.",
+  "AutoUpdater.Console.ErrorInvalidApiResponse": "The Steam API returned an invalid or incomplete response. Retrying at the next interval.",
   "AutoUpdater.Console.ErrorSteamInfNotFound": "The 'steam.inf' file was not found in the root directory of Counter-Strike 2. Path: \"{0}\"",
   "AutoUpdater.Console.ErrorPatchVersionKeyNotFound": "The 'PatchVersion' key could not be located in the steam.inf file.",
   "AutoUpdater.Console.ErrorReadingSteamInf": "An error occurred while reading the 'steam.inf' file: {0}",

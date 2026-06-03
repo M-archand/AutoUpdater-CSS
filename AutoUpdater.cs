@@ -1,186 +1,262 @@
-﻿namespace AutoUpdater
+﻿using CounterStrikeSharp.API;
+using CounterStrikeSharp.API.Core;
+using CounterStrikeSharp.API.Core.Attributes;
+using CounterStrikeSharp.API.Core.Attributes.Registration;
+using CounterStrikeSharp.API.Modules.Admin;
+using CounterStrikeSharp.API.Modules.Commands;
+using CounterStrikeSharp.API.Modules.Timers;
+using CounterStrikeSharp.API.Modules.Utils;
+using System.Text.RegularExpressions;
+using Microsoft.Extensions.Logging;
+using System.Net.Http.Json;
+using Timer = CounterStrikeSharp.API.Modules.Timers.Timer;
+
+namespace AutoUpdater;
+
+[MinimumApiVersion(369)]
+public partial class AutoUpdater : BasePlugin, IPluginConfig<PluginConfig>
 {
-    using CounterStrikeSharp.API;
-    using CounterStrikeSharp.API.Core;
-    using CounterStrikeSharp.API.Core.Attributes;
-    using CounterStrikeSharp.API.Modules.Timers;
-    using CounterStrikeSharp.API.Modules.Cvars;
-    using CounterStrikeSharp.API.Modules.Utils;
-    using System.Text.RegularExpressions;
-    using Microsoft.Extensions.Logging;
-    using System.Net.Http.Json;
-    
-    [MinimumApiVersion(178)]
-    public partial class AutoUpdater : BasePlugin, IPluginConfig<PluginConfig>
+    public override string ModuleName => "AutoUpdater";
+    public override string ModuleAuthor => "dranix, Marchand";
+    public override string ModuleVersion => "1.1.0";
+
+    private const string SteamApiEndpoint =
+        "https://api.steampowered.com/ISteamApps/UpToDateCheck/v0001/?appid=730&version={0}";
+
+    private const int TestRequiredVersion = 9999999;
+
+    public required PluginConfig Config { get; set; } = new();
+    private readonly Dictionary<int, bool> PlayersNotified = new();
+    private double UpdateFoundTime;
+    private bool IsServerLoading;
+    private bool InstantShutdown;
+    private volatile bool RestartRequired;
+    private bool UpdateAvailable;
+    private volatile int RequiredVersion;
+    private Timer? ResendNotificationTimer;
+    private Timer? UpdateCheckTimer;
+    private static readonly HttpClient HttpClient = new() { Timeout = TimeSpan.FromSeconds(10) };
+
+    public override void Load(bool hotReload)
     {
-        public override string ModuleName => "AutoUpdater";
-        public override string ModuleAuthor => "dranix";
-        public override string ModuleDescription => "Auto Updater for Counter-Strike 2.";
-        public override string ModuleVersion => "1.0.5";
+        RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
 
-        private const string SteamApiEndpoint =
-            "https://api.steampowered.com/ISteamApps/UpToDateCheck/v0001/?appid=730&version={0}";
+        RegisterListener<Listeners.OnGameServerSteamAPIActivated>(OnGameServerSteamAPIActivated);
+        RegisterListener<Listeners.OnServerHibernationUpdate>(OnServerHibernationUpdate);
+        RegisterListener<Listeners.OnClientConnected>(OnClientConnected);
+        RegisterListener<Listeners.OnClientDisconnect>(OnClientDisconnect);
+        RegisterListener<Listeners.OnMapStart>(OnMapStart);
+        RegisterListener<Listeners.OnMapEnd>(OnMapEnd);
 
-        public required PluginConfig Config { get; set; } = new();
-        private static Dictionary<int, bool> PlayersNotified = new();
-        private static ConVar? sv_visiblemaxplayers;
-        private static double UpdateFoundTime;
-        private static bool IsServerLoading;
-        private static bool RestartRequired;
-        private static bool UpdateAvailable;
-        private static int RequiredVersion;
+        UpdateCheckTimer = AddTimer(Config.UpdateCheckInterval, CheckServerVersion, TimerFlags.REPEAT);
+    }
 
-        public override void Load(bool hotReload)
+    public override void Unload(bool hotReload)
+    {
+        UpdateCheckTimer?.Kill();
+        UpdateCheckTimer = null;
+
+        ResendNotificationTimer?.Kill();
+        ResendNotificationTimer = null;
+
+        Dispose();
+    }
+
+    public void OnConfigParsed(PluginConfig config)
+    {
+        if (config.Version < Config.Version) Logger.LogWarning(Localizer["AutoUpdater.Console.ConfigVersionMismatch", Config.Version, config.Version]);
+
+        Config = config;
+    }
+
+    private void OnGameServerSteamAPIActivated() => Logger.LogInformation(Localizer["AutoUpdater.Console.UpdateCheckInitiated"]);
+
+    private void OnServerHibernationUpdate(bool isHibernating)
+    {
+        Logger.LogInformation($"Server hibernation status: {(isHibernating ? "Enabled" : "Disabled")}");
+    }
+
+    private void OnMapStart(string mapName)
+    {
+        PlayersNotified.Clear();
+        IsServerLoading = false;
+    }
+
+    private void OnMapEnd()
+    {
+        if (RestartRequired && Config.ShutdownOnMapChangeIfPendingUpdate) PrepareServerShutdown();
+        IsServerLoading = true;
+    }
+
+    private void OnClientConnected(int playerSlot)
+    {
+        CCSPlayerController? player = Utilities.GetPlayerFromSlot(playerSlot);
+        if (player == null || (player?.IsBot ?? false) || (player?.IsHLTV ?? false)) return;
+
+        PlayersNotified[playerSlot] = false;
+    }
+
+    private void OnClientDisconnect(int playerSlot)
+    {
+        PlayersNotified.Remove(playerSlot);
+    }
+
+    private async void CheckServerVersion()
+    {
+        try
         {
-            sv_visiblemaxplayers = ConVar.Find("sv_visiblemaxplayers");
+            if (RestartRequired || !await IsUpdateAvailable()) return;
 
-            RegisterEventHandler<EventPlayerSpawn>(OnPlayerSpawn);
-
-            RegisterListener<Listeners.OnGameServerSteamAPIActivated>(OnGameServerSteamAPIActivated);
-            RegisterListener<Listeners.OnServerHibernationUpdate>(OnServerHibernationUpdate);
-            RegisterListener<Listeners.OnClientConnected>(OnClientConnected);
-            RegisterListener<Listeners.OnClientDisconnect>(OnClientDisconnect);
-            RegisterListener<Listeners.OnMapStart>(OnMapStart);
-            RegisterListener<Listeners.OnMapEnd>(OnMapEnd);
-
-            AddTimer(Config.UpdateCheckInterval, CheckServerVersion, TimerFlags.REPEAT);
-        }
-
-        public override void Unload(bool hotReload) => Dispose();
-
-        public void OnConfigParsed(PluginConfig config)
-        {
-            if (config.Version < Config.Version) Logger.LogWarning(Localizer["AutoUpdater.Console.ConfigVersionMismatch", Config.Version, config.Version]);
-
-            Config = config;
-        }
-
-        private void OnGameServerSteamAPIActivated() => Logger.LogInformation(Localizer["AutoUpdater.Console.UpdateCheckInitiated"]);
-
-        private void OnServerHibernationUpdate(bool isHibernating)
-        {
-            if (isHibernating) Logger.LogInformation(Localizer["AutoUpdater.Console.HibernateWarning"]);
-        }
-
-        private static void OnMapStart(string mapName)
-        {
-            PlayersNotified.Clear();
-            IsServerLoading = false;
-        }
-
-        private void OnMapEnd()
-        {
-            if (RestartRequired && Config.ShutdownOnMapChangeIfPendingUpdate) ShutdownServer();
-            IsServerLoading = true;
-        }
-
-        private static void OnClientConnected(int playerSlot)
-        {
-            CCSPlayerController? player = Utilities.GetPlayerFromSlot(playerSlot);
-            if (player == null || (player?.IsBot ?? false) || (player?.IsHLTV ?? false)) return;
-
-            PlayersNotified.Add(playerSlot, false);
-        }
-
-        private static void OnClientDisconnect(int playerSlot)
-        {
-            PlayersNotified.Remove(playerSlot);
-        }
-
-        private async void CheckServerVersion()
-        {
-            try
+            Server.NextFrame(() =>
             {
-                if (RestartRequired || !await IsUpdateAvailable()) return;
-                
-                Server.NextFrame(ManageServerUpdate);
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError(Localizer["AutoUpdater.Console.ErrorUpdateCheck", ex.Message]);
-            }
+                try
+                {
+                    ManageServerUpdate();
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogError(Localizer["AutoUpdater.Console.ErrorUpdateCheck", ex.Message]);
+                }
+            });
         }
-
-        private void ManageServerUpdate()
+        catch (Exception ex)
         {
-            if (!UpdateAvailable)
-            {
-                UpdateFoundTime = Server.CurrentTime;
-                UpdateAvailable = true;
-                
-                Logger.LogInformation(Localizer["AutoUpdater.Console.NewUpdateReleased", RequiredVersion]);
-            }
-
-            List<CCSPlayerController> players = GetCurrentPlayers();
-
-            if (IsServerLoading || !CheckPlayers(players.Count)) return;
-
-            players.ForEach(NotifyPlayerAboutUpdate);
-            players.ForEach(controller => PlayersNotified[controller.Slot] = true);
-
-            AddTimer(players.Count <= Config.MinPlayersInstantShutdown ? 1 : Config.ShutdownDelay,
-                PrepareServerShutdown,
-                Config.ShutdownOnMapChangeIfPendingUpdate ? TimerFlags.STOP_ON_MAPCHANGE : 0);
-
-            RestartRequired = true;
+            Logger.LogError(Localizer["AutoUpdater.Console.ErrorUpdateCheck", ex.Message]);
         }
+    }
 
-        private bool CheckPlayers(int players)
+    private void ManageServerUpdate()
+    {
+        if (RestartRequired) return;
+
+        if (!UpdateAvailable)
         {
-            var slots = sv_visiblemaxplayers?.GetPrimitiveValue<int>() ?? -1;
-
-            if (slots == -1) slots = Server.MaxPlayers;
-
-            return (float)players / slots < Config.MinPlayerPercentageShutdownAllowed ||
-                   Config.MinPlayersInstantShutdown >= players;
-        }
-
-        private HookResult OnPlayerSpawn(EventPlayerSpawn @event, GameEventInfo info)
-        {
-            if (!UpdateAvailable) return HookResult.Continue;
-
-            CCSPlayerController? player = @event.Userid;
-
-            if (player == null || player!.IsBot || player.TeamNum <= (byte)CsTeam.Spectator) return HookResult.Continue;
-            if (PlayersNotified.TryGetValue(player.Slot, out bool notified) && notified) return HookResult.Continue;
-
-            PlayersNotified[player.Slot] = true;
-
-            Server.NextFrame(() => NotifyPlayerAboutUpdate(player));
-
-            return HookResult.Continue;
-        }
-
-        private void NotifyPlayerAboutUpdate(CCSPlayerController player)
-        {
-            int remainingTime = Math.Max(1, Config.ShutdownDelay - (int)(Server.CurrentTime - UpdateFoundTime));
-
-            string timeUnitLabel =
-                remainingTime >= 60 ? "AutoUpdater.Chat.MinuteLabel" : "AutoUpdater.Chat.SecondLabel";
+            UpdateFoundTime = Server.CurrentTime;
+            UpdateAvailable = true;
             
-            string pluralSuffix = remainingTime > 120 || (remainingTime < 60 && remainingTime != 1)
-                ? $"{Localizer["AutoUpdater.Chat.PluralSuffix"]}"
-                : string.Empty;
-
-            string timeToRestart =
-                $"{(remainingTime >= 60 ? remainingTime / 60 : remainingTime)} {Localizer[timeUnitLabel]}{pluralSuffix}";
-
-            player.PrintToChat(
-                $" {Localizer["AutoUpdater.Chat.Prefix"]} {Localizer["AutoUpdater.Chat.NewUpdateReleased", RequiredVersion, timeToRestart]}");
+            Logger.LogInformation(Localizer["AutoUpdater.Console.NewUpdateReleased", RequiredVersion]);
         }
 
-        private async Task<bool> IsUpdateAvailable()
+        List<CCSPlayerController> players = GetCurrentPlayers();
+
+        if (IsServerLoading) return;
+
+        RestartRequired = true;
+        InstantShutdown = players.Count <= Config.MinPlayersInstantShutdown;
+
+        foreach (var player in players)
         {
-            string steamInfPatchVersion = await GetSteamInfPatchVersion();
+            NotifyPlayerAboutUpdate(player);
+            PlayersNotified[player.Slot] = true;
+        }
 
-            if (string.IsNullOrWhiteSpace(steamInfPatchVersion))
-            {
-                Logger.LogError(Localizer["AutoUpdater.Console.ErrorPatchVersionNull"]);
-                return false;
-            }
+        TimerFlags mapChangeFlag = Config.ShutdownOnMapChangeIfPendingUpdate ? TimerFlags.STOP_ON_MAPCHANGE : 0;
 
-            using HttpClient httpClient = new HttpClient();
-            var response = await httpClient.GetAsync(string.Format(SteamApiEndpoint, steamInfPatchVersion));
+        ResendNotificationTimer = AddTimer(Config.ShutdownMessageInterval,
+            ResendUpdateNotification,
+            TimerFlags.REPEAT | mapChangeFlag);
+
+        AddTimer(InstantShutdown ? 1 : Config.ShutdownDelay,
+            PrepareServerShutdown,
+            mapChangeFlag);
+    }
+
+    /*
+    [ConsoleCommand("css_testupdate", "Simulates a detected update to test the restart flow")]
+    [CommandHelper(whoCanExecute: CommandUsage.CLIENT_AND_SERVER)]
+    [RequiresPermissions("@css/root")]
+    public void OnTestUpdateCommand(CCSPlayerController? player, CommandInfo info)
+    {
+        if (RestartRequired)
+        {
+            info.ReplyToCommand("An update restart is already in progress.");
+            return;
+        }
+
+        // No real Steam check ran, so seed a placeholder version for the
+        // notification messages. A prior real detection's value is kept if set.
+        if (RequiredVersion <= 0) RequiredVersion = TestRequiredVersion;
+
+        Logger.LogWarning("Test update triggered via command. Running the restart flow.");
+        info.ReplyToCommand("Test update triggered via command. Running the restart flow.");
+
+        ManageServerUpdate();
+    }
+    */
+
+    private HookResult OnPlayerSpawn(EventPlayerSpawn @event, GameEventInfo info)
+    {
+        if (!UpdateAvailable) return HookResult.Continue;
+
+        CCSPlayerController? player = @event.Userid;
+
+        if (player == null || player!.IsBot || player.TeamNum <= (byte)CsTeam.Spectator) return HookResult.Continue;
+        if (PlayersNotified.TryGetValue(player.Slot, out bool notified) && notified) return HookResult.Continue;
+
+        PlayersNotified[player.Slot] = true;
+
+        Server.NextFrame(() =>
+        {
+            if (player is not { IsValid: true }) return;
+
+            NotifyPlayerAboutUpdate(player);
+        });
+
+        return HookResult.Continue;
+    }
+
+    private void NotifyPlayerAboutUpdate(CCSPlayerController player)
+    {
+        if (InstantShutdown)
+        {
+            player.PrintToChat(
+                $" {Localizer["AutoUpdater.Chat.Prefix"]} {Localizer["AutoUpdater.Chat.InstantRestart"]}");
+            return;
+        }
+
+        int remainingTime = Math.Max(1, Config.ShutdownDelay - (int)(Server.CurrentTime - UpdateFoundTime));
+
+        int minutes = remainingTime / 60;
+        int seconds = remainingTime % 60;
+
+        List<string> parts = new();
+        if (minutes > 0) parts.Add(FormatTimeUnit(minutes, "AutoUpdater.Chat.MinuteLabel"));
+        if (seconds > 0) parts.Add(FormatTimeUnit(seconds, "AutoUpdater.Chat.SecondLabel"));
+
+        string timeToRestart = string.Join(" ", parts);
+
+        player.PrintToChat(
+            $" {Localizer["AutoUpdater.Chat.Prefix"]} {Localizer["AutoUpdater.Chat.NewUpdateReleased", RequiredVersion, timeToRestart]}");
+    }
+
+    private string FormatTimeUnit(int value, string labelKey)
+    {
+        string suffix = value != 1 ? $"{Localizer["AutoUpdater.Chat.PluralSuffix"]}" : string.Empty;
+        return $"{value} {Localizer[labelKey]}{suffix}";
+    }
+
+    private void ResendUpdateNotification()
+    {
+        if (IsServerLoading) return;
+
+        GetCurrentPlayers().ForEach(NotifyPlayerAboutUpdate);
+    }
+
+    private async Task<bool> IsUpdateAvailable()
+    {
+        string steamInfPatchVersion = await GetSteamInfPatchVersion();
+
+        if (string.IsNullOrWhiteSpace(steamInfPatchVersion))
+        {
+            Logger.LogError(Localizer["AutoUpdater.Console.ErrorPatchVersionNull"]);
+            return false;
+        }
+
+        UpToDateCheckResponse.UpToDateCheck? result;
+
+        try
+        {
+            var response = await HttpClient.GetAsync(string.Format(SteamApiEndpoint, steamInfPatchVersion));
 
             if (!response.IsSuccessStatusCode)
             {
@@ -188,73 +264,78 @@
                 return false;
             }
 
-            var upToDateCheckResponse = await response.Content.ReadFromJsonAsync<UpToDateCheckResponse>();
-            RequiredVersion = (int)upToDateCheckResponse?.Response?.RequiredVersion!;
-
-            return upToDateCheckResponse.Response is { Success: true, UpToDate: false };
+            result = (await response.Content.ReadFromJsonAsync<UpToDateCheckResponse>())?.Response;
+        }
+        catch (Exception ex)
+        {
+            Logger.LogError(Localizer["AutoUpdater.Console.ErrorSteamRequestException", ex.Message]);
+            return false;
         }
 
-        private async Task<string> GetSteamInfPatchVersion()
+        if (result is not { Success: true } || result.RequiredVersion <= 0)
         {
-            string steamInfPath = Path.Combine(Server.GameDirectory, "csgo", "steam.inf");
+            Logger.LogError(Localizer["AutoUpdater.Console.ErrorInvalidApiResponse"]);
+            return false;
+        }
 
-            if (!File.Exists(steamInfPath))
-            {
-                Logger.LogError(Localizer["AutoUpdater.Console.ErrorSteamInfNotFound", steamInfPath]);
-                return string.Empty;
-            }
+        RequiredVersion = result.RequiredVersion;
 
-            try
-            {
-                string steamInfContents = await File.ReadAllTextAsync(steamInfPath);
-                Match match = PatchVersionRegex().Match(steamInfContents);
+        return !result.UpToDate;
+    }
 
-                if (match.Success) return match.Groups[1].Value;
+    private async Task<string> GetSteamInfPatchVersion()
+    {
+        string steamInfPath = Path.Combine(Server.GameDirectory, "csgo", "steam.inf");
 
-                Logger.LogError(Localizer["AutoUpdater.Console.ErrorPatchVersionKeyNotFound", steamInfPath]);
-
-                return string.Empty;
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError(Localizer["AutoUpdater.Console.ErrorReadingSteamInf", ex.Message]);
-            }
-
+        if (!File.Exists(steamInfPath))
+        {
+            Logger.LogError(Localizer["AutoUpdater.Console.ErrorSteamInfNotFound", steamInfPath]);
             return string.Empty;
         }
 
-        private void PrepareServerShutdown()
+        try
         {
-            List<CCSPlayerController> players = GetCurrentPlayers();
+            string steamInfContents = await File.ReadAllTextAsync(steamInfPath);
+            Match match = PatchVersionRegex().Match(steamInfContents);
 
-            foreach (var player in players)
-            {
-                switch (player.Connected)
-                {
-                    case PlayerConnectedState.PlayerConnected:
-                    case PlayerConnectedState.PlayerConnecting:
-                    case PlayerConnectedState.PlayerReconnecting:
-                        Server.ExecuteCommand(
-                            $"kickid {player.UserId} Due to the game update (Version: {RequiredVersion}), the server is now restarting.");
-                        break;
-                }
-            }
+            if (match.Success) return match.Groups[1].Value;
 
-            AddTimer(1, ShutdownServer);
+            Logger.LogError(Localizer["AutoUpdater.Console.ErrorPatchVersionKeyNotFound", steamInfPath]);
+
+            return string.Empty;
         }
-        
-        private void ShutdownServer()
+        catch (Exception ex)
         {
-            Logger.LogInformation(Localizer["AutoUpdater.Console.ServerShutdownInitiated", RequiredVersion]);
-            Server.ExecuteCommand("quit");
+            Logger.LogError(Localizer["AutoUpdater.Console.ErrorReadingSteamInf", ex.Message]);
         }
 
-        private static List<CCSPlayerController> GetCurrentPlayers()
-        {
-            return Utilities.GetPlayers().Where(controller => controller is { IsValid: true, IsBot: false, IsHLTV: false }).ToList();
-        }
-
-        [GeneratedRegex(@"PatchVersion=(?<version>[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)", RegexOptions.ExplicitCapture, 1000)]
-        private static partial Regex PatchVersionRegex();
+        return string.Empty;
     }
-}    
+
+    private void PrepareServerShutdown()
+    {
+        ResendNotificationTimer?.Kill();
+        ResendNotificationTimer = null;
+
+        if (!InstantShutdown)
+        {
+            GetCurrentPlayers().ForEach(NotifyPlayerAboutUpdate);
+        }
+
+        AddTimer(1, ShutdownServer);
+    }
+    
+    private void ShutdownServer()
+    {
+        Logger.LogInformation(Localizer["AutoUpdater.Console.ServerShutdownInitiated", RequiredVersion]);
+        Server.ExecuteCommand("quit");
+    }
+
+    private static List<CCSPlayerController> GetCurrentPlayers()
+    {
+        return Utilities.GetPlayers().Where(controller => controller is { IsValid: true, IsBot: false, IsHLTV: false }).ToList();
+    }
+
+    [GeneratedRegex(@"PatchVersion=(?<version>[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)", RegexOptions.ExplicitCapture, 1000)]
+    private static partial Regex PatchVersionRegex();
+}  
