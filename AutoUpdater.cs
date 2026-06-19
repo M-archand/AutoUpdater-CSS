@@ -272,7 +272,15 @@ public partial class AutoUpdater : BasePlugin, IPluginConfig<PluginConfig>
             return false;
         }
 
-        if (result is not { Success: true } || result.RequiredVersion <= 0)
+        if (result is not { Success: true })
+        {
+            Logger.LogError(Localizer["AutoUpdater.Console.ErrorInvalidApiResponse"]);
+            return false;
+        }
+
+        if (result.UpToDate) return false;
+
+        if (result.RequiredVersion <= 0)
         {
             Logger.LogError(Localizer["AutoUpdater.Console.ErrorInvalidApiResponse"]);
             return false;
@@ -280,7 +288,7 @@ public partial class AutoUpdater : BasePlugin, IPluginConfig<PluginConfig>
 
         RequiredVersion = result.RequiredVersion;
 
-        return !result.UpToDate;
+        return true;
     }
 
     private async Task<string> GetSteamInfPatchVersion()
