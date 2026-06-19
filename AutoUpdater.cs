@@ -18,7 +18,7 @@ public partial class AutoUpdater : BasePlugin, IPluginConfig<PluginConfig>
 {
     public override string ModuleName => "AutoUpdater";
     public override string ModuleAuthor => "dranix, Marchand";
-    public override string ModuleVersion => "1.1.0";
+    public override string ModuleVersion => "1.1.1";
 
     private const string SteamApiEndpoint =
         "https://api.steampowered.com/ISteamApps/UpToDateCheck/v0001/?appid=730&version={0}";
